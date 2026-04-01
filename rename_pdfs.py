@@ -1,7 +1,8 @@
 """
 Academic PDF Renamer
 ====================
-Batch-renames PDF files in a target directory using embedded metadata.
+Renames PDF files using embedded metadata.  Accepts either a directory
+(batch-renames every PDF inside it) or the path to an individual PDF.
 When embedded metadata is incomplete, the script searches online using
 the CrossRef API — first by DOI (extracted from the PDF text), then by
 a free-text search of the paper's first page.
@@ -446,15 +447,69 @@ def unique_path(directory: str, base_name: str, extension: str = ".pdf") -> str:
 
 
 # ──────────────────────────────────────────────
-#  Main renaming logic
+#  Single-file renaming logic
+# ──────────────────────────────────────────────
+
+def rename_single_pdf(filepath: str) -> bool:
+    """
+    Process one PDF file: extract/enrich metadata and rename in-place.
+
+    Returns True if the file was renamed, False if it was skipped.
+    """
+    directory = os.path.dirname(filepath)
+    filename = os.path.basename(filepath)
+
+    print(f"  Processing: '{filename}'")
+
+    try:
+        meta = get_metadata(filepath)
+    except fitz.fitz.FileDataError:
+        print(f"  [SKIP] '{filename}' — corrupted or unreadable PDF data.")
+        return False
+    except Exception as e:
+        print(f"  [SKIP] '{filename}' — {type(e).__name__}: {e}")
+        return False
+
+    # ── If metadata is incomplete, try online lookups ──
+    if not (meta["title"] and meta["author"] and meta["year"]):
+        try:
+            meta = enrich_metadata(meta, filepath, filename)
+        except Exception as e:
+            print(f"    ↳ Online lookup failed ({type(e).__name__}: {e}) — using local metadata only.")
+
+        # Small delay between API calls to respect CrossRef rate limits.
+        time.sleep(0.5)
+
+    base_name = build_filename(meta)
+
+    if base_name is None:
+        print(f"  [SKIP] '{filename}' — no title found in metadata or online.")
+        return False
+
+    new_path = unique_path(directory, base_name)
+    new_filename = os.path.basename(new_path)
+
+    # Don't rename if the file already has the target name.
+    if new_filename == filename:
+        print(f"  [OK]   '{filename}' — already correctly named.")
+        return False
+
+    try:
+        os.rename(filepath, new_path)
+        print(f"  [RENAMED] '{filename}'\n"
+              f"         → '{new_filename}'")
+        return True
+    except OSError as e:
+        print(f"  [ERROR] Could not rename '{filename}' — {e}")
+        return False
+
+
+# ──────────────────────────────────────────────
+#  Batch renaming (entire folder)
 # ──────────────────────────────────────────────
 
 def rename_pdfs(folder: str) -> None:
     """Iterate over every PDF in *folder* and rename using metadata."""
-
-    if not os.path.isdir(folder):
-        print(f"[ERROR] '{folder}' is not a valid directory.")
-        sys.exit(1)
 
     pdf_files = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
 
@@ -469,53 +524,9 @@ def rename_pdfs(folder: str) -> None:
 
     for filename in pdf_files:
         filepath = os.path.join(folder, filename)
-        print(f"  Processing: '{filename}'")
-
-        try:
-            meta = get_metadata(filepath)
-        except fitz.fitz.FileDataError:
-            # Corrupted or unreadable PDF data.
-            print(f"  [SKIP] '{filename}' — corrupted or unreadable PDF data.")
-            skipped += 1
-            continue
-        except Exception as e:
-            # Catch-all for password-protected files, permission errors, etc.
-            print(f"  [SKIP] '{filename}' — {type(e).__name__}: {e}")
-            skipped += 1
-            continue
-
-        # ── If metadata is incomplete, try online lookups ──
-        if not (meta["title"] and meta["author"] and meta["year"]):
-            try:
-                meta = enrich_metadata(meta, filepath, filename)
-            except Exception as e:
-                print(f"    ↳ Online lookup failed ({type(e).__name__}: {e}) — using local metadata only.")
-
-            # Small delay between API calls to respect CrossRef rate limits.
-            time.sleep(0.5)
-
-        base_name = build_filename(meta)
-
-        if base_name is None:
-            print(f"  [SKIP] '{filename}' — no title found in metadata or online.")
-            skipped += 1
-            continue
-
-        new_path = unique_path(folder, base_name)
-        new_filename = os.path.basename(new_path)
-
-        # Don't rename if the file already has the target name.
-        if new_filename == filename:
-            print(f"  [OK]   '{filename}' — already correctly named.")
-            continue
-
-        try:
-            os.rename(filepath, new_path)
-            print(f"  [RENAMED] '{filename}'\n"
-                  f"         → '{new_filename}'")
+        if rename_single_pdf(filepath):
             renamed += 1
-        except OSError as e:
-            print(f"  [ERROR] Could not rename '{filename}' — {e}")
+        else:
             skipped += 1
 
     # ── Summary ──
@@ -536,7 +547,7 @@ if __name__ == "__main__":
 
     while True:
         try:
-            target = input("Enter the path to the folder containing PDFs: ").strip()
+            target = input("Enter the path to a folder or a single PDF file: ").strip()
         except (KeyboardInterrupt, EOFError):
             # Handle Ctrl+C / Ctrl+D gracefully.
             print("\nGoodbye!")
@@ -554,5 +565,17 @@ if __name__ == "__main__":
             print("[WARN] No path entered. Try again.\n")
             continue
 
-        rename_pdfs(target)
+        if os.path.isfile(target):
+            # ── Single file mode ──
+            if not target.lower().endswith(".pdf"):
+                print("[ERROR] The file does not appear to be a PDF.\n")
+                continue
+            rename_single_pdf(target)
+        elif os.path.isdir(target):
+            # ── Folder mode (batch) ──
+            rename_pdfs(target)
+        else:
+            print(f"[ERROR] '{target}' is not a valid file or directory.\n")
+            continue
+
         print()  # blank line before the next prompt
