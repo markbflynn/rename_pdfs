@@ -417,7 +417,12 @@ def build_filename(meta: dict) -> str | None:
     return base
 
 
-def unique_path(directory: str, base_name: str, extension: str = ".pdf") -> str:
+def unique_path(
+    directory: str,
+    base_name: str,
+    extension: str = ".pdf",
+    current_path: str | None = None,
+) -> str:
     """
     Return a full path that does not collide with existing files.
 
@@ -425,14 +430,21 @@ def unique_path(directory: str, base_name: str, extension: str = ".pdf") -> str:
       Author (2020) - Title (1).pdf
       Author (2020) - Title (2).pdf
       ...
+
+    current_path is treated as a valid match for the target. This lets
+    callers safely reprocess a file that already has its intended name.
     """
     # Truncate the base name so the full filename stays within limits.
     # Account for extension length and potential suffix like " (99)".
     max_base = MAX_FILENAME_LENGTH - len(extension)
     base_name = base_name[:max_base]
+    current_path = (
+        os.path.normcase(os.path.abspath(current_path)) if current_path else None
+    )
 
     candidate = os.path.join(directory, base_name + extension)
-    if not os.path.exists(candidate):
+    candidate_key = os.path.normcase(os.path.abspath(candidate))
+    if not os.path.exists(candidate) or candidate_key == current_path:
         return candidate
 
     # Append an incrementing counter until we find a free name.
@@ -486,7 +498,7 @@ def rename_single_pdf(filepath: str) -> bool:
         print(f"  [SKIP] '{filename}' — no title found in metadata or online.")
         return False
 
-    new_path = unique_path(directory, base_name)
+    new_path = unique_path(directory, base_name, current_path=filepath)
     new_filename = os.path.basename(new_path)
 
     # Don't rename if the file already has the target name.
